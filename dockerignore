@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+.git/
+*.user
+Dockerfile
+.dockerignore
+# Secret image mein na jaye (Render Secret File se aayegi)
+firebase-service-account.json
+appsettings.Development.json
