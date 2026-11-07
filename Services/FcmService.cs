@@ -19,27 +19,48 @@ namespace Notification.Services
         private readonly ILogger<FcmService> _logger;
         private readonly bool _isConfigured;
 
-        /// <summary>
-        /// Public URL to the BNMU seal (served from wwwroot via
-        /// app.UseStaticFiles() in Program.cs). Shown as a big-picture
-        /// image when a push notification is expanded — this is the
-        /// logo-in-notification behaviour for the background/closed-app
-        /// case; the foreground case is handled separately by Flutter's
-        /// own largeIcon on NotificationDetails. Null (and the field is
-        /// just omitted) if PublicBaseUrl isn't set in appsettings.json.
-        /// </summary>
-        private readonly string? _logoImageUrl;
+        private const string DefaultAttachmentsBaseUrl =
+            "https://bnmu.collegeesolution.org/BNMU/UNI_DOCUMENT/NOTIFICATION";
+
+        // Only these can be shown as the expanded big picture of a push.
+        // PDFs / docs can't be previewed in a notification, so for those
+        // only the file name is added to the body (see BuildBody).
+        private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"
+        };
+
+        private readonly string _attachmentsBaseUrl;
 
         public FcmService(ILogger<FcmService> logger, IConfiguration config)
         {
             _logger = logger;
             _isConfigured = FirebaseAdmin.FirebaseApp.DefaultInstance != null;
 
-            var publicBaseUrl = config["PublicBaseUrl"];
-            _logoImageUrl = string.IsNullOrWhiteSpace(publicBaseUrl)
-                ? null
-                : $"{publicBaseUrl.TrimEnd('/')}/bnmu_logo.png";
+            _attachmentsBaseUrl = (config["AttachmentsBaseUrl"] ?? DefaultAttachmentsBaseUrl).TrimEnd('/');
         }
+
+        /// <summary>
+        /// Public URL of the notice's attachment if (and only if) it is an
+        /// image, else null (field is then simply omitted from the push).
+        /// </summary>
+        private string? GetAttachmentImageUrl(NoticePushRequest notice)
+        {
+            var name = notice.AttachmentName;
+            if (string.IsNullOrWhiteSpace(name)) return null;
+            if (!ImageExtensions.Contains(Path.GetExtension(name))) return null;
+            return $"{_attachmentsBaseUrl}/{Uri.EscapeDataString(name)}";
+        }
+
+        /// <summary>
+        /// Notification body: the description, plus the attachment's file
+        /// name on a new line when there is one, so non-image attachments
+        /// (PDF etc.) are still visible in the tray.
+        /// </summary>
+        private static string BuildBody(NoticePushRequest notice) =>
+            string.IsNullOrWhiteSpace(notice.AttachmentName)
+                ? notice.Description
+                : $"{notice.Description}\n\U0001F4CE {notice.AttachmentName}";
 
         /// <summary>
         /// Sends a push notification to every device subscribed to
@@ -65,7 +86,7 @@ namespace Notification.Services
                 Notification = new FirebaseAdmin.Messaging.Notification
                 {
                     Title = notice.Title,
-                    Body = notice.Description,
+                    Body = BuildBody(notice),
                 },
                 Data = new Dictionary<string, string>
                 {
@@ -86,7 +107,7 @@ namespace Notification.Services
                     Notification = new AndroidNotification
                     {
                         ChannelId = "bnmu_notices_channel",
-                        ImageUrl = _logoImageUrl,
+                        ImageUrl = GetAttachmentImageUrl(notice),
                     },
                 },
             };
@@ -148,7 +169,7 @@ namespace Notification.Services
                     Notification = new FirebaseAdmin.Messaging.Notification
                     {
                         Title = notice.Title,
-                        Body = notice.Description,
+                        Body = BuildBody(notice),
                     },
                     Data = data,
                     Android = new AndroidConfig
@@ -156,7 +177,7 @@ namespace Notification.Services
                         Notification = new AndroidNotification
                         {
                             ChannelId = "bnmu_notices_channel",
-                            ImageUrl = _logoImageUrl,
+                            ImageUrl = GetAttachmentImageUrl(notice),
                         },
                     },
                 };
