@@ -1,0 +1,175 @@
+using FirebaseAdmin.Messaging;
+using Notification.Models;
+
+namespace Notification.Services
+{
+    /// <summary>
+    /// NOTE ON NAMING: this project's root namespace is "Notification",
+    /// which collides with FirebaseAdmin's own `Notification` class
+    /// (FirebaseAdmin.Messaging.Notification). Every reference to that
+    /// type below is fully qualified as
+    /// `FirebaseAdmin.Messaging.Notification` for that reason — don't
+    /// shorten it, the bare name resolves to this namespace instead and
+    /// won't compile.
+    /// </summary>
+    public class FcmService
+    {
+        private const string DefaultTopic = "all_students";
+
+        private readonly ILogger<FcmService> _logger;
+        private readonly bool _isConfigured;
+
+        /// <summary>
+        /// Public URL to the BNMU seal (served from wwwroot via
+        /// app.UseStaticFiles() in Program.cs). Shown as a big-picture
+        /// image when a push notification is expanded — this is the
+        /// logo-in-notification behaviour for the background/closed-app
+        /// case; the foreground case is handled separately by Flutter's
+        /// own largeIcon on NotificationDetails. Null (and the field is
+        /// just omitted) if PublicBaseUrl isn't set in appsettings.json.
+        /// </summary>
+        private readonly string? _logoImageUrl;
+
+        public FcmService(ILogger<FcmService> logger, IConfiguration config)
+        {
+            _logger = logger;
+            _isConfigured = FirebaseAdmin.FirebaseApp.DefaultInstance != null;
+
+            var publicBaseUrl = config["PublicBaseUrl"];
+            _logoImageUrl = string.IsNullOrWhiteSpace(publicBaseUrl)
+                ? null
+                : $"{publicBaseUrl.TrimEnd('/')}/bnmu_logo.png";
+        }
+
+        /// <summary>
+        /// Sends a push notification to every device subscribed to
+        /// <paramref name="topic"/>. The Flutter app subscribes to
+        /// "all_students" on startup, so the default reaches every
+        /// installed app instance — no device-token table needed.
+        /// Returns null (and logs a warning) if Firebase hasn't been
+        /// configured yet (missing service account key), rather than
+        /// throwing, so the rest of the API keeps working either way.
+        /// </summary>
+        public async Task<string?> PublishNoticeAsync(NoticePushRequest notice, string topic = DefaultTopic)
+        {
+            if (!_isConfigured)
+            {
+                _logger.LogWarning(
+                    "Firebase is not configured (missing firebase-service-account.json) — push not sent.");
+                return null;
+            }
+
+            var message = new Message
+            {
+                Topic = topic,
+                Notification = new FirebaseAdmin.Messaging.Notification
+                {
+                    Title = notice.Title,
+                    Body = notice.Description,
+                },
+                Data = new Dictionary<string, string>
+                {
+                    ["id"] = notice.Id ?? Guid.NewGuid().ToString(),
+                    ["title"] = notice.Title,
+                    ["description"] = notice.Description,
+                    ["category"] = notice.Category,
+                    ["collegeName"] = notice.CollegeName,
+                    ["publishDate"] = notice.PublishDate ?? DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                    ["icon"] = notice.Icon,
+                    ["attachmentName"] = notice.AttachmentName ?? "",
+                    ["attachmentSize"] = notice.AttachmentSize ?? "",
+                    ["importantNote"] = notice.ImportantNote
+                        ?? "For further updates, keep checking the official notice board.",
+                },
+                Android = new AndroidConfig
+                {
+                    Notification = new AndroidNotification
+                    {
+                        ChannelId = "bnmu_notices_channel",
+                        ImageUrl = _logoImageUrl,
+                    },
+                },
+            };
+
+            var messageId = await FirebaseMessaging.DefaultInstance.SendAsync(message);
+            _logger.LogInformation("FCM push sent to topic '{Topic}': {MessageId}", topic, messageId);
+            return messageId;
+        }
+
+        /// <summary>
+        /// Sends a push notification to a specific list of device tokens
+        /// (as opposed to <see cref="PublishNoticeAsync"/>, which
+        /// broadcasts to everyone subscribed to a topic). Used by
+        /// NoticePushWorker to push a targeted notice only to the
+        /// students it's actually meant for, and only to devices that are
+        /// currently registered (i.e. someone is logged in on them).
+        /// Returns how many of the tokens the push was successfully
+        /// delivered to; 0 if Firebase isn't configured or the list is
+        /// empty.
+        /// </summary>
+        public async Task<int> SendToTokensAsync(IReadOnlyList<string> tokens, NoticePushRequest notice)
+        {
+            if (!_isConfigured || tokens.Count == 0)
+            {
+                if (!_isConfigured)
+                {
+                    _logger.LogWarning(
+                        "Firebase is not configured (missing firebase-service-account.json) — push not sent.");
+                }
+                return 0;
+            }
+
+            var data = new Dictionary<string, string>
+            {
+                ["id"] = notice.Id ?? Guid.NewGuid().ToString(),
+                ["title"] = notice.Title,
+                ["description"] = notice.Description,
+                ["category"] = notice.Category,
+                ["collegeName"] = notice.CollegeName,
+                ["publishDate"] = notice.PublishDate ?? DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                ["icon"] = notice.Icon,
+                ["attachmentName"] = notice.AttachmentName ?? "",
+                ["attachmentSize"] = notice.AttachmentSize ?? "",
+                ["importantNote"] = notice.ImportantNote
+                    ?? "For further updates, keep checking the official notice board.",
+            };
+
+            int successCount = 0;
+
+            // FCM caps a single multicast call at 500 tokens — chunk in
+            // case a notice's recipient list is ever larger than that.
+            for (int i = 0; i < tokens.Count; i += 500)
+            {
+                var batch = tokens.Skip(i).Take(500).ToList();
+
+                var message = new MulticastMessage
+                {
+                    Tokens = batch,
+                    Notification = new FirebaseAdmin.Messaging.Notification
+                    {
+                        Title = notice.Title,
+                        Body = notice.Description,
+                    },
+                    Data = data,
+                    Android = new AndroidConfig
+                    {
+                        Notification = new AndroidNotification
+                        {
+                            ChannelId = "bnmu_notices_channel",
+                            ImageUrl = _logoImageUrl,
+                        },
+                    },
+                };
+
+                var response = await FirebaseMessaging.DefaultInstance.SendEachForMulticastAsync(message);
+                successCount += response.SuccessCount;
+
+                _logger.LogInformation(
+                    "FCM multicast for notice {NoticeId}: {Success}/{Total} delivered.",
+                    notice.Id, response.SuccessCount, batch.Count);
+            }
+
+            return successCount;
+        }
+    }
+}

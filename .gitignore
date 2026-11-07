@@ -1,0 +1,21 @@
+# Build files
+bin/
+obj/
+
+# User-specific files
+*.csproj.user
+*.suo
+
+# Firebase credentials
+firebase-service-account.json
+**/firebase-service-account.json
+
+# Environment files
+.env
+.env.*
+
+# Visual Studio
+.vs/
+
+# Logs
+*.log
